@@ -16,7 +16,7 @@ use 5.008;
 use Config;
 use Getopt::Long;
 
-my ($program, $version) = ('help2man', '1.48.5');
+my ($program, $version) = ('help2man', '1.49.3');
 
 my %opts;
 die "Usage: $0 [--quiet] [--stdout] [--with-gettext] [--name] [--version]\n"
@@ -54,7 +54,7 @@ print OUT <<"!GROK!THIS!" if $Config{sharpbang} !~ /^#!/;
 eval 'exec $Config{perlpath} -wS \$0 \${1+"\$@"}'
     if \$running_under_some_shell;
 
-\$running_under_some_shell = 0; # for -w
+\$running_under_some_shell = 0;  # for -w
 !GROK!THIS!
 
 # No substitutions for this chunk:
@@ -62,7 +62,7 @@ print OUT <<'!NO!SUBS!';
 
 # Generate a short man page from --help and --version output.
 # Copyright (C) 1997, 1998, 1999, 2000, 2001, 2002, 2003, 2004, 2005, 2009,
-# 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2020, 2021 Free Software
+# 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2020, 2021, 2022 Free Software
 # Foundation, Inc.
 
 # This program is free software; you can redistribute it and/or modify
@@ -91,7 +91,7 @@ use POSIX qw(strftime setlocale LC_ALL);
 
 print OUT <<'!NO!SUBS!' if $opts{'with-gettext'};
 use Locale::gettext qw(gettext);
-use Encode qw(decode encode);
+use Encode qw(find_encoding decode encode);
 use I18N::Langinfo qw(langinfo CODESET);
 !NO!SUBS!
 
@@ -104,9 +104,37 @@ my \$this_version = '$version';
 
 # Conditionally include gettext support:
 print OUT $opts{'with-gettext'} ? <<'!WITH!GETTEXT!' : <<'!NO!GETTEXT!';
-my $encoding;
+my $encoder;
 
 {
+    # Fallback to running iconv for encodings which are not supported
+    # by the Encode module.
+    sub run_iconv
+    {
+	my ($from, $to, $str) = @_;
+	return $str if $from eq $to;  # no-op
+
+	my $pid = open C, '-|';
+	die "can't fork: $!" unless defined $pid;
+	unless ($pid)
+	{
+	    open STDERR, '>/dev/null';
+	    open ICONV, '|-', 'iconv', '-f', $from, '-t', $to
+		or die "can't fork: $!";
+	    print ICONV $str;
+	    exit 0;
+	}
+
+	local $/;
+	my $enc = <C>;
+	close C;
+	return $? ? $str : $enc;
+    }
+
+    sub fallback::new { bless \(my $self = $_[1]), $_[0] }
+    sub fallback::decode { decode 'UTF-8', run_iconv ${$_[0]}, 'UTF-8', $_[1] }
+    sub fallback::encode { run_iconv 'UTF-8', ${$_[0]}, encode 'UTF-8', $_[1] }
+
     my $gettext = Locale::gettext->domain($this_program);
     sub _ { $gettext->get($_[0]) }
 
@@ -114,19 +142,24 @@ my $encoding;
 	(map $ENV{$_}, qw(LANGUAGE LC_ALL LC_MESSAGES LANG)), 'C';
 
     my $user_encoding = langinfo CODESET;
+    my $user_encoder = (find_encoding $user_encoding) ||
+	fallback->new($user_encoding);
 
     # Set localisation of date and executable's output.
     sub configure_locale
     {
 	delete @ENV{qw(LANGUAGE LC_MESSAGES LANG)};
 	setlocale LC_ALL, $ENV{LC_ALL} = shift || 'C';
-	$encoding = langinfo CODESET;
+	my $encoding = langinfo CODESET;
+	$encoder = (find_encoding $encoding) || fallback->new($encoding);
     }
 
-    sub dec { $encoding ? decode $encoding, $_[0] : $_[0] }
-    sub enc { $encoding ? encode $encoding, $_[0] : $_[0] }
-    sub enc_user { encode $user_encoding, $_[0] }
-    sub kark # die with message formatted in the invoking user's locale
+    sub dec { $encoder ? $encoder->decode($_[0]) : $_[0] }
+    sub enc { $encoder ? $encoder->encode($_[0]) : $_[0] }
+    sub enc_user { $user_encoder->encode($_[0]) }
+
+    # Die with message formatted in the invoking user's locale.
+    sub kark
     {
 	setlocale LC_ALL, $user_locale;
 	my $fmt = $gettext->get(shift);
@@ -164,7 +197,7 @@ my $version_info = enc_user sprintf _(<<'EOT'), $this_program, $this_version;
 GNU %s %s
 
 Copyright (C) 1997, 1998, 1999, 2000, 2001, 2002, 2003, 2004, 2005, 2009,
-2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2020, 2021 Free Software
+2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2020, 2021, 2022 Free Software
 Foundation, Inc.
 This is free software; see the source for copying conditions.  There is NO
 warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
@@ -238,7 +271,7 @@ die $help_info unless GetOptions %opt_def and @ARGV == 1;
 !NO!SUBS!
 
 print OUT <<'!NO!SUBS!' if $opts{'with-gettext'};
-configure_locale unless $encoding;
+configure_locale unless $encoder;
 
 !NO!SUBS!
 
@@ -297,13 +330,13 @@ while (@opt_include)
 	    $key =~ s/^\s+//;
 	    $key =~ s/\s+$//;
 	    $hash = \%include;
-	    # Handle explicit [<section], [=section] and [>section]
+	    # Handle explicit [<section], [=section] and [>section].
 	    if ($key =~ s/^([<>=])\s*//)
 	    {
 		if    ($1 eq '>') { $hash = \%append; }
 		elsif ($1 eq '=') { $hash = \%replace; }
 	    }
-	    # NAME/SYNOPSIS replace by default
+	    # NAME/SYNOPSIS replace by default.
 	    elsif ($key eq _('NAME') or $key eq _('SYNOPSIS'))
 	    {
 		$hash = \%replace;
@@ -339,7 +372,7 @@ while (@opt_include)
 	# revision info.
 	unless ($key)
 	{
-	    # handle options
+	    # Handle options.
 	    if (/^-/)
 	    {
 		local @ARGV = shellwords $_;
@@ -384,7 +417,7 @@ if (exists $ENV{SOURCE_DATE_EPOCH} and $ENV{SOURCE_DATE_EPOCH} =~ /^(\d+)$/)
 # the English version expands to the month as a word and the full year.  It
 # is used on the footer of the generated manual pages.  If in doubt, you may
 # just use %x as the value (which should be the full locale-specific date).
-my $date = enc strftime _("%B %Y"), localtime $epoch_secs;
+my $date = strftime _("%B %Y"), localtime $epoch_secs;
 my $program = program_basename $ARGV[0];
 my $package = $program;
 my $version;
@@ -459,15 +492,15 @@ for ($replace{_('NAME')} || ($include{_('NAME')} ||= ''))
 # Man pages traditionally have the page title in caps.
 my $PROGRAM = uc $program;
 
-# Set default page head/footers
+# Set default page head/footers.
 $source ||= "$package $version";
 unless ($manual)
 {
     for ($section)
     {
-	if (/^(1[Mm]|8)/) { $manual = enc _('System Administration Utilities') }
-	elsif (/^6/)	  { $manual = enc _('Games') }
-	else		  { $manual = enc _('User Commands') }
+	if (/^(1[Mm]|8)/) { $manual = _('System Administration Utilities') }
+	elsif (/^6/)	  { $manual = _('Games') }
+	else		  { $manual = _('User Commands') }
     }
 }
 
@@ -653,7 +686,7 @@ while (length)
     {
 	$matched .= $& if %append_match;
 	$content = ".HP\n\x84$1\n";
-	$indent = 80; # not continued
+	$indent = 80;  # not continued
     }
 
     # Indented paragraph with tag.
@@ -788,7 +821,7 @@ while (my ($sect, $text) = each %replace)
 }
 
 # Output header.
-print <<EOT;
+print enc <<EOT;
 .\\" DO NOT MODIFY THIS FILE!  It was generated by $this_program $this_version.
 .TH $PROGRAM "$section" "$date" "$source" "$manual"
 EOT
@@ -819,8 +852,8 @@ for my $sect (@pre, (grep !$filter{$_}, @sections), @post)
 	    s/\x82/\\e/g;
 	    s/\x83/\\-/g;
 
-	    # Convert some latin1 chars to troff equivalents
-	    s/\xa0/\\ /g; # non-breaking space
+	    # Convert some latin1 chars to troff equivalents.
+	    s/\xa0/\\ /g;  # non-breaking space
 
 	    print enc $_;
 	}
@@ -891,7 +924,7 @@ sub fix_italic_spacing
 }
 !NO!SUBS!
 
-# Rename output and fix permissions
+# Rename output and fix permissions.
 unless ($opts{stdout})
 {
     close OUT;
